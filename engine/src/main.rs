@@ -25,10 +25,7 @@ fn main()
                                 order.status = OrderStatus::Cancelled;
                             }
                         }
-                        let event = EngineEvent::OrderCancelled { 
-                            event: String::from("order_cancelled"),
-                            order_id 
-                        };
+                        let event = EngineEvent::OrderCancelled { order_id };
                         let str_event = serde_json::to_string(&event).unwrap();
                         let _ = con.publish("trade_events", str_event);
                     }
@@ -54,7 +51,6 @@ fn main()
 
                         if let Some(final_order) = db.orders.get(&new_order_id) {
                             let event = EngineEvent::OrderPlaced { 
-                                event: String::from("order_placed"),
                                 order: final_order.clone(), 
                                 remaining: final_order.quantity - final_order.filled_qty 
                             };
@@ -68,7 +64,6 @@ fn main()
                             let maker_remaining = maker_order.quantity - maker_order.filled_qty;
                             
                             let fill_event = EngineEvent::Fill { 
-                                event: String::from("fill"),
                                 symbol: fill.symbol, 
                                 trade_id: fill.trade_id, 
                                 maker_id: fill.maker_id, 

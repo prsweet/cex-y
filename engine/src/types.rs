@@ -301,14 +301,13 @@ pub enum EngineCommand {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(tag = "type")]
 pub enum EngineEvent {
     OrderPlaced {
-        event: String,
         order: Order,
         remaining: u64
     },
     Fill {
-        event: String,
         symbol: String,
         trade_id: String,
         maker_id: String,
@@ -319,11 +318,9 @@ pub enum EngineEvent {
         maker_remaining: u64
     },
     OrderCancelled {
-        event: String,
         order_id: String
     },
     Error {
-        event: String,
         message: String
     }
 }
