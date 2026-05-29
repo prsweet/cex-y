@@ -1,12 +1,9 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+mod types;
 
 use chrono::Utc;
 use redis::TypedCommands;
 use ulid::Ulid;
-
-use crate::types::{EngineCommand, EngineDB, EngineEvent, Order, OrderBook};
-
-mod types;
+use crate::types::*;
 
 fn main()
 {
@@ -22,7 +19,18 @@ fn main()
                         
                     }
                     EngineCommand::CancelOrder { symbol, order_id } => {  
-                        
+                        if let Some(orderbook) = db.orderbooks.get_mut(&symbol) {
+                            orderbook.remove_order(&order_id);
+                            if let Some(order) = db.orders.get_mut(&order_id) {
+                                order.status = OrderStatus::Cancelled;
+                            }
+                        }
+                        let event = EngineEvent::OrderCancelled { 
+                            event: String::from("order_cancelled"),
+                            order_id 
+                        };
+                        let str_event = serde_json::to_string(&event).unwrap();
+                        let _ = con.publish("trade_events", str_event);
                     }
                     EngineCommand::PlaceOrder { symbol, user_id, side, order_type, price, quantity } => {
                         let orderbook = db.orderbooks.entry(symbol.clone()).or_insert_with(OrderBook::new);
@@ -46,6 +54,7 @@ fn main()
 
                         if let Some(final_order) = db.orders.get(&new_order_id) {
                             let event = EngineEvent::OrderPlaced { 
+                                event: String::from("order_placed"),
                                 order: final_order.clone(), 
                                 remaining: final_order.quantity - final_order.filled_qty 
                             };
@@ -59,6 +68,7 @@ fn main()
                             let maker_remaining = maker_order.quantity - maker_order.filled_qty;
                             
                             let fill_event = EngineEvent::Fill { 
+                                event: String::from("fill"),
                                 symbol: fill.symbol, 
                                 trade_id: fill.trade_id, 
                                 maker_id: fill.maker_id, 
