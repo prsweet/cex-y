@@ -2,6 +2,8 @@ use std::{collections::{BTreeMap, HashMap}};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
+use crate::types::OrderStatus::Open;
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum Side { Buy, Sell }
 
@@ -10,8 +12,6 @@ pub enum OrderType { Limit, Market }
 
 #[derive(Debug, Serialize, Clone, Copy)]
 pub enum OrderStatus { PartiallyFilled, Open, Cancelled, Filled }
-
-// making of doubly linked list
 
 #[derive(Debug)]
 pub struct RestingNode {
@@ -313,7 +313,7 @@ pub enum EngineEvent {
         taker_id: String,
         price: u64,
         quantity: u64,
-        taker_status: OrderStatus,
+        maker_status: OrderStatus,
         maker_remaining: u64
     },
     OrderCancelled {

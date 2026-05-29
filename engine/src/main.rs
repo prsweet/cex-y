@@ -1,37 +1,80 @@
-use std::io::{self, BufRead};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::types::{EngineCommand, EngineDB, EngineEvent};
+use chrono::Utc;
+use redis::TypedCommands;
+use ulid::Ulid;
+
+use crate::types::{EngineCommand, EngineDB, EngineEvent, Order, OrderBook};
 
 mod types;
 
 fn main()
 {
-    let stdin = io::stdin();
-    let mut reader = stdin.lock();
-    let mut line = String::new();
-
-    while reader.read_line(&mut line).unwrap() > 0 {
-        let cmd: Result<EngineCommand, _> = serde_json::from_str(line.trim());
-        match cmd {
-            Ok(cmd) => {
+    let mut db = EngineDB::new();
+    let client = redis::Client::open("redis://127.0.0.1/").expect("failed to connect redis");
+    let mut con = client.get_connection().expect("failed to get tht connection");
+    loop {
+        let received = con.brpop("order_queue", 0.0);
+        if let Ok(Some([_, data])) = received {
+            if let Ok(cmd) = serde_json::from_str::<EngineCommand>(&data) {
                 match cmd {
-                    EngineCommand::CancelOrder { symbol, order_id } => {
-                        println!("got command to cancel order");
+                    EngineCommand::GetOrderBook { symbol } => {
+                        
+                    }
+                    EngineCommand::CancelOrder { symbol, order_id } => {  
                         
                     }
                     EngineCommand::PlaceOrder { symbol, user_id, side, order_type, price, quantity } => {
-                        println!("got command to place order");
-                    }
-                    EngineCommand::GetOrderBook { symbol } => {
-                        println!("got command to get orderbook");
+                        let orderbook = db.orderbooks.entry(symbol.clone()).or_insert_with(OrderBook::new);
+                        let new_order_id = Ulid::new().to_string();
+                        let mut create_order = Order {
+                            symbol,
+                            user_id,
+                            order_id: new_order_id.clone(),
+                            side,
+                            order_type,
+                            timestamp: Utc::now().timestamp() as u64,
+                            price,
+                            quantity,
+                            filled_qty: 0,
+                            filled: Vec::new(),
+                            status: types::OrderStatus::Open
+                        };
+                        let fills = orderbook.match_order(&mut create_order);
+                        db.orders.insert(new_order_id.clone(), create_order.clone());
+                        db.fill_order(fills.clone());
+
+                        if let Some(final_order) = db.orders.get(&new_order_id) {
+                            let event = EngineEvent::OrderPlaced { 
+                                order: final_order.clone(), 
+                                remaining: final_order.quantity - final_order.filled_qty 
+                            };
+                            let str_event = serde_json::to_string(&event).unwrap();
+                            let _ = con.publish("trade_events", str_event);
+                        }
+
+                        for fill in fills {
+                            let Some(maker_order) = db.orders.get(&fill.maker_order_id) else { continue; };
+                            let maker_status = maker_order.status;
+                            let maker_remaining = maker_order.quantity - maker_order.filled_qty;
+                            
+                            let fill_event = EngineEvent::Fill { 
+                                symbol: fill.symbol, 
+                                trade_id: fill.trade_id, 
+                                maker_id: fill.maker_id, 
+                                taker_id: fill.taker_id, 
+                                price: fill.price, 
+                                quantity: fill.quantity, 
+                                maker_status,
+                                maker_remaining
+                            };
+
+                            let str_fill = serde_json::to_string(&fill_event).unwrap();
+                            let _ = con.publish("trade_events", str_fill);
+                        }
                     }
                 }
             }
-            Err(e) => {
-                let event = EngineEvent::Error { message: format!("JSON parse error {}", e) };
-                println!("{}", serde_json::to_string(&event).unwrap());
-            }
         }
-        line.clear();
     }
 }
