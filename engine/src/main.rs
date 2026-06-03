@@ -16,7 +16,15 @@ fn main()
             if let Ok(cmd) = serde_json::from_str::<EngineCommand>(&data) {
                 match cmd {
                     EngineCommand::GetOrderBook { symbol } => {
-                        
+                        let (bids, asks) = if let Some(orderbook) = db.orderbooks.get(&symbol) {
+                            orderbook.get_depth()
+                        } else {
+                            (Vec::new(), Vec::new())
+                        };
+
+                        let event = EngineEvent::OrderBookDepth { symbol, bids, asks };
+                        let str_event = serde_json::to_string(&event).unwrap();
+                        let _ = con.publish("trade_events", str_event);
                     }
                     EngineCommand::CancelOrder { symbol, order_id } => {  
                         if let Some(orderbook) = db.orderbooks.get_mut(&symbol) {
@@ -66,8 +74,6 @@ fn main()
                             let fill_event = EngineEvent::Fill { 
                                 symbol: fill.symbol, 
                                 trade_id: fill.trade_id, 
-                                maker_id: fill.maker_id, 
-                                taker_id: fill.taker_id, 
                                 price: fill.price, 
                                 quantity: fill.quantity, 
                                 maker_status,

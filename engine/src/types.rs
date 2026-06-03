@@ -2,8 +2,6 @@ use std::{collections::{BTreeMap, HashMap}};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use crate::types::OrderStatus::Open;
-
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum Side { Buy, Sell }
 
@@ -23,21 +21,14 @@ pub struct RestingNode {
 #[derive(Debug)]
 pub struct PriceLevel {
     head: Option<String>,
-    tail: Option<String>
-}
-
-#[derive(Debug)]
-pub struct Balance {
-    pub free: u64,
-    pub locked: u64
+    tail: Option<String>,
+    total_qty: u64
 }
 
 #[derive(Debug, Serialize, Clone)]
 pub struct Fill {
     pub symbol: String,
     pub trade_id: String,
-    pub maker_id: String,
-    pub taker_id: String,
     pub maker_order_id: String,
     pub taker_order_id: String,
     pub price: u64,
@@ -97,7 +88,13 @@ impl OrderBook {
             Side::Sell => &mut self.asks
         };
 
-        let level = levels.entry(price).or_insert(PriceLevel { head: None, tail: None });
+        let level = levels.entry(price).or_insert(PriceLevel { 
+            head: None, 
+            tail: None,
+            total_qty: 0,
+        });
+
+        level.total_qty += order.qty;
 
         match &level.tail {
             None => {
@@ -165,16 +162,30 @@ impl OrderBook {
                 fills.push(Fill {
                     symbol: created_order.symbol.clone(),
                     trade_id: Ulid::new().to_string(),
-                    maker_id: resting_order.user_id.clone(),
                     maker_order_id: resting_order.order_id.clone(),
                     taker_order_id: created_order.order_id.clone(),
-                    taker_id: created_order.user_id.clone(),
                     price: matched_price,
                     quantity: filled_qty
                 });
-    
+
+                if let Some(last_fill) = fills.last() {
+                    created_order.filled.push(last_fill.clone());
+                    created_order.status = OrderStatus::PartiallyFilled;
+                }
                 created_order.filled_qty += filled_qty;
                 resting_order.qty -= filled_qty;
+
+                let book_side = match created_order.side {
+                    Side::Buy => &mut self.asks,
+                    Side::Sell => &mut self.bids
+                };
+
+                if let Some(mut level) = match created_order.side {
+                    Side::Buy => book_side.first_entry(),
+                    Side::Sell => book_side.last_entry()
+                } {
+                    level.get_mut().total_qty -= filled_qty;
+                }
 
                 (resting_order.qty == 0, resting_order.order_id.clone())
             };            
@@ -196,6 +207,8 @@ impl OrderBook {
             };
 
             self.add_resting_order(new_resting_order);
+        } else {
+            created_order.status = OrderStatus::Filled;
         }
         
         return fills;
@@ -211,35 +224,53 @@ impl OrderBook {
             let Some(level) = book_side.get_mut(&resting_node.order.price) else { return; };
             level
         };
-        let next_id = resting_node.next_node.clone();
-        match next_id {
+
+        level.total_qty -= resting_node.order.qty;
+        
+        match resting_node.next_node.clone() {
             Some(next_id) => {
                 if let Some(next_resting_node) = self.order_nodes.get_mut(&next_id) {
                     next_resting_node.prev_node = resting_node.prev_node.clone();
                 }
             } None => {
-                level.tail = None;
+                level.tail = resting_node.prev_node.clone();
             }
         };
 
-        let prev_id = resting_node.prev_node.clone();
-        match prev_id {
+        match resting_node.prev_node.clone() {
             Some(prev_id) => {
                 if let Some(prev_resting_node) = self.order_nodes.get_mut(&prev_id) {
                     prev_resting_node.next_node = resting_node.next_node.clone();
                 }
             } None => {
-                level.head = None;
-                book_side.remove_entry(&resting_node.order.price);
+                level.head = resting_node.next_node.clone();
             }
         }
+
+        if level.head.is_none() && level.tail.is_none() {
+            book_side.remove_entry(&resting_node.order.price);
+        }
+    }
+
+    pub fn get_depth(&self) -> (Vec<(u64, u64)>, Vec<(u64, u64)>) {
+        let bids: Vec<(u64, u64)> = self.bids.iter()
+            .map(|(&price, level)| { (price, level.total_qty) })
+            .rev()
+            .take(50)
+            .collect();
+
+        let asks: Vec<(u64, u64)> = self.asks.iter()
+            .map(|(&price, level)| { (price, level.total_qty) })
+            .take(50)
+            .collect();
+
+        (bids, asks)
     }
 }
 
 #[derive(Debug)]
 pub struct EngineDB {
     pub orderbooks: HashMap<String, OrderBook>,
-    pub balances: HashMap<String, HashMap<String, Balance>>,
     pub orders: HashMap<String, Order>
 }
 
@@ -247,7 +278,6 @@ impl EngineDB {
     pub fn new() -> Self {
         Self { 
             orderbooks: HashMap::new(),
-            balances: HashMap::new(),
             orders: HashMap::new() 
         }
     }
@@ -263,18 +293,6 @@ impl EngineDB {
                     maker.status = OrderStatus::PartiallyFilled
                 } else {
                     maker.status = OrderStatus::Filled
-                }
-            }
-            
-            let taker = self.orders.get_mut(&val.taker_order_id);
-
-            if let Some(taker) = taker {
-                taker.filled.push(val.clone());
-                taker.filled_qty += val.quantity;
-                if taker.filled_qty < taker.quantity {
-                    taker.status = OrderStatus::PartiallyFilled
-                } else {
-                    taker.status = OrderStatus::Filled
                 }
             }
         }
@@ -310,12 +328,15 @@ pub enum EngineEvent {
     Fill {
         symbol: String,
         trade_id: String,
-        maker_id: String,
-        taker_id: String,
         price: u64,
         quantity: u64,
         maker_status: OrderStatus,
         maker_remaining: u64
+    },
+    OrderBookDepth {
+      symbol: String,
+      bids: Vec<(u64, u64)>,
+      asks: Vec<(u64, u64)>,
     },
     OrderCancelled {
         order_id: String
