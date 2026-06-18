@@ -1,90 +1,104 @@
-mod types;
+use std::collections::HashMap;
 
 use chrono::Utc;
-use redis::TypedCommands;
+use krafka::consumer::{AutoOffsetReset, Consumer};
+use tokio::sync::mpsc::{self, Receiver};
 use ulid::Ulid;
+
 use crate::types::*;
 
-fn main()
-{
-    let mut db = EngineDB::new();
-    let client = redis::Client::open("redis://127.0.0.1/").expect("failed to connect redis");
-    let mut con = client.get_connection().expect("failed to get tht connection");
+mod types;
+
+#[tokio::main]
+async fn main() {
+    let consumer = Consumer::builder()
+        .bootstrap_servers("localhost:9092")
+        .enable_auto_commit(true)
+        .group_id("cex-y-engine")
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .build()
+        .await
+        .unwrap();
+
+    consumer.subscribe(&["orders"]).await.unwrap();
+
+    let mut actors: HashMap<String, mpsc::Sender<EngineCommand>> = HashMap::new();
+
     loop {
-        let received = con.brpop("order_queue", 0.0);
-        if let Ok(Some([_, data])) = received {
-            if let Ok(cmd) = serde_json::from_str::<EngineCommand>(&data) {
-                match cmd {
-                    EngineCommand::GetOrderBook { symbol } => {
-                        let (bids, asks) = if let Some(orderbook) = db.orderbooks.get(&symbol) {
-                            orderbook.get_depth()
-                        } else {
-                            (Vec::new(), Vec::new())
-                        };
+        match consumer.recv().await {
+            Ok(received) => {
+                if let Ok(cmd) =
+                    serde_json::from_str::<EngineCommand>(&received.value_str().unwrap())
+                {
+                    println!("received {:?}", cmd);
+                    let symbol = match &cmd {
+                        EngineCommand::CancelOrder { symbol, .. } => symbol,
+                        EngineCommand::PlaceOrder { symbol, .. } => symbol,
+                        EngineCommand::GetOrderBook { symbol } => symbol,
+                    };
 
-                        let event = EngineEvent::OrderBookDepth { symbol, bids, asks };
-                        let str_event = serde_json::to_string(&event).unwrap();
-                        let _ = con.publish("trade_events", str_event);
-                    }
-                    EngineCommand::CancelOrder { symbol, order_id } => {  
-                        if let Some(orderbook) = db.orderbooks.get_mut(&symbol) {
-                            orderbook.remove_order(&order_id);
-                            if let Some(order) = db.orders.get_mut(&order_id) {
-                                order.status = OrderStatus::Cancelled;
-                            }
-                        }
-                        let event = EngineEvent::OrderCancelled { order_id };
-                        let str_event = serde_json::to_string(&event).unwrap();
-                        let _ = con.publish("trade_events", str_event);
-                    }
-                    EngineCommand::PlaceOrder { symbol, user_id, side, order_type, price, quantity } => {
-                        let orderbook = db.orderbooks.entry(symbol.clone()).or_insert_with(OrderBook::new);
-                        let new_order_id = Ulid::new().to_string();
-                        let mut create_order = Order {
-                            symbol,
-                            user_id,
-                            order_id: new_order_id.clone(),
-                            side,
-                            order_type,
-                            timestamp: Utc::now().timestamp() as u64,
-                            price,
-                            quantity,
-                            filled_qty: 0,
-                            filled: Vec::new(),
-                            status: types::OrderStatus::Open
-                        };
-                        let fills = orderbook.match_order(&mut create_order);
-                        db.orders.insert(new_order_id.clone(), create_order.clone());
-                        db.fill_order(fills.clone());
+                    let sender = actors.entry(symbol.clone()).or_insert_with(|| {
+                        let (tx, rx) = mpsc::channel(100);
+                        tokio::spawn(actor_loop(rx));
+                        tx
+                    });
 
-                        if let Some(final_order) = db.orders.get(&new_order_id) {
-                            let event = EngineEvent::OrderPlaced { 
-                                order: final_order.clone(), 
-                                remaining: final_order.quantity - final_order.filled_qty 
-                            };
-                            let str_event = serde_json::to_string(&event).unwrap();
-                            let _ = con.publish("trade_events", str_event);
-                        }
-
-                        for fill in fills {
-                            let Some(maker_order) = db.orders.get(&fill.maker_order_id) else { continue; };
-                            let maker_status = maker_order.status;
-                            let maker_remaining = maker_order.quantity - maker_order.filled_qty;
-                            
-                            let fill_event = EngineEvent::Fill { 
-                                symbol: fill.symbol, 
-                                trade_id: fill.trade_id, 
-                                price: fill.price, 
-                                quantity: fill.quantity, 
-                                maker_status,
-                                maker_remaining
-                            };
-
-                            let str_fill = serde_json::to_string(&fill_event).unwrap();
-                            let _ = con.publish("trade_events", str_fill);
-                        }
-                    }
+                    let _ = sender.send(cmd).await;
+                } else {
+                    //TODO: lets see what we have to do here there will be many things i guess
                 }
+            }
+            Err(e) => {
+                eprintln!("{:#?}", e);
+            }
+        }
+    }
+}
+
+async fn actor_loop(mut rx: Receiver<EngineCommand>) {
+    let mut orderbook = OrderBook::new();
+
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            EngineCommand::PlaceOrder {
+                symbol,
+                user_id,
+                side,
+                order_type,
+                price,
+                quantity,
+            } => {
+                let new_order_id = Ulid::new().to_string();
+                let mut created_order = Order {
+                    symbol,
+                    user_id,
+                    order_id: new_order_id.clone(),
+                    order_type,
+                    side,
+                    timestamp: Utc::now().timestamp() as u64,
+                    price,
+                    quantity,
+                    filled: Vec::new(),
+                    filled_qty: 0,
+                    status: OrderStatus::Open,
+                };
+
+                let fills = orderbook.match_order(&mut created_order);
+                println!(
+                    "Order {}: {} fills, {}/{} filled",
+                    new_order_id,
+                    fills.len(),
+                    created_order.filled_qty,
+                    created_order.quantity
+                );
+            }
+            EngineCommand::CancelOrder { order_id, .. } => {
+                orderbook.remove_order(&order_id);
+                println!("Cancelled {}", order_id);
+            }
+            EngineCommand::GetOrderBook { symbol } => {
+                let (bids, asks) = orderbook.get_depth();
+                println!("{}: {} bids, {} asks", symbol, bids.len(), asks.len());
             }
         }
     }
