@@ -1,5 +1,6 @@
 use std::{collections::{BTreeMap, HashMap}};
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot::Sender;
 use ulid::Ulid;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
@@ -16,6 +17,18 @@ pub struct RestingNode {
     order: RestingOrder,
     prev_node: Option<String>,
     next_node: Option<String>
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolBalance {
+    pub available: u64,
+    pub locked: u64
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum BalancePool {
+    Available,
+    Locked
 }
 
 #[derive(Debug)]
@@ -214,42 +227,46 @@ impl OrderBook {
         return fills;
     }
 
-    pub fn remove_order(&mut self, order_id: &str) {
-        let Some(resting_node) = self.order_nodes.remove(order_id) else { return; };
+    pub fn remove_order(&mut self, order_id: &str) -> Option<RestingNode> {
+        let resting_node = self.order_nodes.remove(order_id)?;
+        
         let book_side = match resting_node.order.side {
             Side::Buy => &mut self.bids,
             Side::Sell => &mut self.asks
         };
-        let level = {
-            let Some(level) = book_side.get_mut(&resting_node.order.price) else { return; };
-            level
-        };
+        
+        let level = book_side.get_mut(&resting_node.order.price)
+            .expect("OrderBook corrupted: Price level not found for the removing order");
 
         level.total_qty -= resting_node.order.qty;
-        
+
         match resting_node.next_node.clone() {
             Some(next_id) => {
-                if let Some(next_resting_node) = self.order_nodes.get_mut(&next_id) {
-                    next_resting_node.prev_node = resting_node.prev_node.clone();
+                if let Some(next_node) = self.order_nodes.get_mut(&next_id) {
+                    next_node.prev_node = resting_node.prev_node.clone();
                 }
-            } None => {
+            }
+            None => {
                 level.tail = resting_node.prev_node.clone();
             }
         };
 
         match resting_node.prev_node.clone() {
             Some(prev_id) => {
-                if let Some(prev_resting_node) = self.order_nodes.get_mut(&prev_id) {
-                    prev_resting_node.next_node = resting_node.next_node.clone();
+                if let Some(prev_node) = self.order_nodes.get_mut(&prev_id) {
+                    prev_node.next_node = resting_node.next_node.clone();
                 }
-            } None => {
-                level.head = resting_node.next_node.clone();
             }
-        }
+            None => {
+                level.head = resting_node.prev_node.clone();
+            }
+        };
 
         if level.head.is_none() && level.tail.is_none() {
             book_side.remove_entry(&resting_node.order.price);
         }
+
+        Some(resting_node)
     }
 
     pub fn get_depth(&self) -> (Vec<(u64, u64)>, Vec<(u64, u64)>) {
@@ -318,20 +335,39 @@ pub enum EngineCommand {
     }
 }
 
+pub enum BalanceCommand {
+    CheckAndLock {
+        user_id: String,
+        symbol: String,
+        side: Side,
+        price: u64,
+        quantity: u64,
+        respond_tx: Sender<Result<(), String>>
+    }
+}
+
+pub enum BalanceEvent {
+    Fill {
+        symbol: String,
+        price: u64,
+        quantity: u64,
+        maker_user_id: String,
+        taker_user_id: String,
+        taker_side: Side
+    },
+    CancelOrder {
+        user_id: String,
+        symbol: String,
+        amount: u64
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum EngineEvent {
     OrderPlaced {
         order: Order,
         remaining: u64
-    },
-    Fill {
-        symbol: String,
-        trade_id: String,
-        price: u64,
-        quantity: u64,
-        maker_status: OrderStatus,
-        maker_remaining: u64
     },
     OrderBookDepth {
       symbol: String,
