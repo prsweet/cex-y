@@ -76,8 +76,16 @@ async fn main() {
                         respond_tx
                     }).await;
 
-                    if let Ok(Ok(())) = respond_rx.await {
-                        let _ = using_actor_tx.send(ActorCommand::PlaceOrder { symbol, user_id, side, order_type, price, quantity }).await;
+                    match respond_rx.await {
+                        Ok(Ok(())) => {
+                            let _ = using_actor_tx.send(ActorCommand::PlaceOrder { symbol, user_id, side, order_type, price, quantity }).await;
+                        },
+                        Ok(Err(e)) => {
+                            eprintln!("Order Rejected for {}: Insufficient Funds (Error: {})", user_id, e);
+                        },
+                        Err(e) => {
+                            eprintln!("FATAL: BalanceActor failed to respond! Channel dropped. Error: {:#?}", e);
+                        }
                     }
                 });
             },
