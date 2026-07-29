@@ -42,6 +42,8 @@ pub struct PriceLevel {
 pub struct Fill {
     pub symbol: String,
     pub trade_id: String,
+    pub buy_user_id: String,
+    pub sell_user_id: String,
     pub maker_order_id: String,
     pub taker_order_id: String,
     pub price: u64,
@@ -139,22 +141,20 @@ impl OrderBook {
     pub fn match_order(&mut self, created_order: &mut Order) -> Vec<Fill> {
         let mut fills: Vec<Fill> = Vec::new();
         while created_order.quantity > created_order.filled_qty {
-            let order_id = {
-                let book_side = match created_order.side {
-                    Side::Buy => &mut self.asks,
-                    Side::Sell => &mut self.bids
-                };
-                let best_level = match created_order.side {
-                    Side::Buy => book_side.first_entry(),
-                    Side::Sell => book_side.last_entry()
-                };
-                let Some(level) = best_level else { break; };
-                let Some(order_id) = level.get().head.clone() else { break };
-                order_id
+            let book_side = match created_order.side {
+                Side::Buy => &self.asks,
+                Side::Sell => &self.bids
             };
+            
+            let Some(best_level) = match created_order.side {
+                Side::Buy => book_side.first_key_value(),
+                Side::Sell => book_side.last_key_value()
+            }.map(|(_, level)| level) else { break };
+
+            let Some(order_id) = best_level.head.clone() else { break; };
 
             let (fully_filled, resting_order_id) = {
-                let Some(resting_node) = self.order_nodes.get_mut(&order_id) else { break };
+                let Some(resting_node) = self.order_nodes.get_mut(&order_id) else { break; };
                 let resting_order = &mut resting_node.order;
                 
                 let is_match = match created_order.order_type {
@@ -166,6 +166,7 @@ impl OrderBook {
                         }
                     }
                 };
+                
                 if !is_match { break };
                 
                 let remain = created_order.quantity - created_order.filled_qty;
@@ -175,6 +176,8 @@ impl OrderBook {
                 fills.push(Fill {
                     symbol: created_order.symbol.clone(),
                     trade_id: Ulid::new().to_string(),
+                    maker_user_id: resting_order.user_id.clone(),
+                    taker_user_id: created_order.user_id.clone(),
                     maker_order_id: resting_order.order_id.clone(),
                     taker_order_id: created_order.order_id.clone(),
                     price: matched_price,
@@ -209,22 +212,29 @@ impl OrderBook {
         }
 
         if created_order.filled_qty < created_order.quantity {
-            let new_resting_order = RestingOrder {
-                symbol: created_order.symbol.clone(),
-                order_id: created_order.order_id.clone(),
-                user_id: created_order.user_id.clone(),
-                side: created_order.side.clone(),
-                price: created_order.price,
-                qty: created_order.quantity - created_order.filled_qty,
-                timestamp: created_order.timestamp
-            };
-
-            self.add_resting_order(new_resting_order);
+            match created_order.order_type {
+                OrderType::Limit => {
+                    let new_resting_order = RestingOrder {
+                        symbol: created_order.symbol.clone(),
+                        order_id: created_order.order_id.clone(),
+                        user_id: created_order.user_id.clone(),
+                        side: created_order.side.clone(),
+                        price: created_order.price,
+                        qty: created_order.quantity - created_order.filled_qty,
+                        timestamp: created_order.timestamp
+                    };
+        
+                    self.add_resting_order(new_resting_order);
+                }
+                OrderType::Market => {
+                    created_order.status = OrderStatus::Cancelled;
+                }
+            }
         } else {
             created_order.status = OrderStatus::Filled;
         }
         
-        return fills;
+        fills
     }
 
     pub fn remove_order(&mut self, order_id: &str) -> Option<RestingNode> {
@@ -351,9 +361,8 @@ pub enum BalanceEvent {
         symbol: String,
         price: u64,
         quantity: u64,
-        maker_user_id: String,
-        taker_user_id: String,
-        taker_side: Side
+        buy_user_id: String,
+        sell_user_id: String,
     },
     CancelOrder {
         user_id: String,

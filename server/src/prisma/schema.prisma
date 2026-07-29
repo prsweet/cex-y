@@ -1,0 +1,87 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+    id String @default(cuid()) @id
+    name String
+    email String @unique
+    password String
+    balances Balance[]
+    orders Order[]
+    createdAt DateTime @default(now())
+}
+
+model Asset {
+    id String @default(cuid()) @id
+    name String
+    symbol String @unique
+    decimals Int @default(6)
+    createdAt DateTime @default(now())
+}
+
+model Fill {
+    trade_id String @id
+    symbol String
+    maker_order_id String
+    maker_order Order @relation(name: "maker_fills", fields: [maker_order_id], references: [id])
+    taker_order_id String
+    taker_order Order @relation(name: "taker_fills", fields: [taker_order_id], references: [id])
+    price BigInt
+    quantity BigInt
+}
+
+model Balance {
+    id String @id @default(cuid())
+    user_id String
+    user User @relation(fields: [user_id], references: [id])
+    symbol String
+    free BigInt @default(0)
+    locked BigInt @default(0)
+    updatedAt DateTime @updatedAt
+    @@unique([user_id, symbol])
+}
+
+model Order {
+    id String @id
+    symbol String
+    user_id String
+    user User @relation(fields: [user_id], references: [id])
+    side Side
+    order_type OrderType
+    price BigInt
+    quantity BigInt
+    filled_qty BigInt @default(0)
+    fills_as_maker Fill[] @relation("maker_fills")
+    fills_as_taker Fill[] @relation("taker_fills")
+    timestamp BigInt
+    createdAt DateTime @default(now())
+    status OrderStatus @default(Open)
+}
+
+enum Side { 
+    Buy 
+    Sell 
+}
+
+enum OrderType { 
+    Limit  
+    Market 
+}
+
+enum OrderStatus { 
+    PartiallyFilled 
+    Open 
+    Cancelled 
+    Filled 
+}
