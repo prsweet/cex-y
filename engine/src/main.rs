@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use krafka::consumer::{AutoOffsetReset, Consumer};
-use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::sync::mpsc;
 
 use crate::{actors::*, types::*};
 
@@ -17,66 +17,75 @@ async fn main() {
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .build()
         .await
-        .unwrap();
+        .expect("failed to make kafka consumer");
 
-    consumer.subscribe(&["orders"]).await.unwrap();
-    let (bal_cmd_tx, bal_cmd_rx) = channel::<BalanceCommand>(0);
-    let (bal_event_tx, bal_event_rx) = channel::<BalanceEvent>(0);
+    consumer.subscribe(&["orders"]).await.expect("failed to subscribe kafka consumer");
+    let (bal_cmd_tx, bal_cmd_rx) = mpsc::channel::<BalanceCommand>(10000);
+    let (bal_event_tx, bal_event_rx) = mpsc::channel::<BalanceEvent>(10000);
     let  balance_actor = BalanceActor::new(bal_cmd_rx, bal_event_rx);
     tokio::spawn(balance_actor.run());
     
-    let mut symbol_actors: HashMap<String, Sender<ActorCommand>> = HashMap::new();
+    let mut symbol_actors: HashMap<String, mpsc::Sender<ActorCommand>> = HashMap::new();
 
     loop {
-        match consumer.recv().await {
-            Ok(received) => {
-                if let Ok(cmd) = serde_json::from_str::<ActorCommand>(&received.value_str().unwrap()) {
-                    println!("received {:?}", cmd);
-                    let symbol = match &cmd {
-                        ActorCommand::CancelOrder { symbol, .. } => symbol.clone(),
-                        ActorCommand::PlaceOrder { symbol, .. } => symbol.clone(),
-                        ActorCommand::GetOrderBook { symbol } => symbol.clone(),
-                    };
-
-                    let sender = symbol_actors.entry(symbol.clone()).or_insert_with(|| {
-                        let (tx, rx) = channel(0);
-                        let actor = SymbolActor::new(symbol.clone(), rx, bal_event_tx.clone());
-                        tokio::spawn(actor.run());
-                        tx
-                    });
-
-                    let sender_clone = sender.clone();
-                    let bal_cmd_tx_clone = bal_cmd_tx.clone();
-
-                    match cmd {
-                        ActorCommand::PlaceOrder { symbol, user_id, side, order_type, price, quantity } => {
-                            let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
-                            tokio::spawn(async move {
-                                let _ = bal_cmd_tx_clone.send(BalanceCommand::CheckAndLock { 
-                                    user_id: user_id.clone(), 
-                                    symbol: symbol.clone(), 
-                                    side,
-                                    price, 
-                                    quantity, 
-                                    respond_tx
-                                }).await;
-
-                                if let Ok(Ok(())) = respond_rx.await {
-                                    let _ = sender_clone.send(ActorCommand::PlaceOrder { symbol, user_id, side, order_type, price, quantity }).await;
-                                }
-                            });
-                        },
-                        _ => {
-                            let _ = sender_clone.send(cmd).await;
-                        }
-                    }
-                } else {
-                    //TODO: lets see what we have to do here there will be many things i guess
-                }
-            }
+        let received = match consumer.recv().await {
+            Ok(msg) => msg,
             Err(e) => {
-                eprintln!("{:#?}", e);
+                eprintln!("Failed to receive message from Kafka!: {:#?}", e);
+                continue;
+            }
+        };
+        
+        let Some(msg_str) = received.value_str() else {
+            eprintln!("CRITICAL: Received message of invalid format from Kafka! Skipping.");
+            continue;
+        };
+
+        let Ok(cmd) = serde_json::from_str::<ActorCommand>(msg_str) else {
+            eprintln!("CRITICAL: Received invalid JSON! Skipping. Payload: {}", msg_str);
+            continue;
+        };
+
+        println!("received {:?}", cmd);
+        let symbol = match &cmd {
+            ActorCommand::CancelOrder { symbol, .. } => symbol.clone(),
+            ActorCommand::PlaceOrder { symbol, .. } => symbol.clone(),
+            ActorCommand::GetOrderBook { symbol } => symbol.clone(),
+        };
+
+        let actor_tx = symbol_actors.entry(symbol.clone()).or_insert_with(|| {
+            let (tx, rx) = mpsc::channel(10000);
+            let actor = SymbolActor::new(symbol.clone(), rx, bal_event_tx.clone());
+            tokio::spawn(actor.run());
+            tx
+        });
+
+        let using_bal_cmd_tx = bal_cmd_tx.clone();
+        let using_actor_tx = actor_tx.clone();
+        
+        match cmd {
+            ActorCommand::PlaceOrder { symbol, user_id, side, order_type, price, quantity } => {
+                let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    let _ = using_bal_cmd_tx.send(BalanceCommand::CheckAndLock { 
+                        user_id: user_id.clone(), 
+                        symbol: symbol.clone(), 
+                        side,
+                        price, 
+                        quantity, 
+                        respond_tx
+                    }).await;
+
+                    if let Ok(Ok(())) = respond_rx.await {
+                        let _ = using_actor_tx.send(ActorCommand::PlaceOrder { symbol, user_id, side, order_type, price, quantity }).await;
+                    }
+                });
+            },
+            _ => {
+                let _ = using_actor_tx.send(cmd).await;
             }
         }
+        
     }
+    
 }
