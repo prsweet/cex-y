@@ -63,9 +63,8 @@ async fn test_settlement_buy_transaction() {
         symbol: "BTC_USDT".to_string(),
         price: 500,
         quantity: 2,
-        maker_user_id: "user_2".to_string(), // Maker gets BTC (which saturates at 0 locked)
-        taker_user_id: "user_1".to_string(), // Taker gets 1000 USDT (price 500 * quantity 2)
-        taker_side: Side::Sell,
+        buy_user_id: "user_2".to_string(), // Buyer gets BTC
+        sell_user_id: "user_1".to_string(), // Seller gets 1000 USDT (price 500 * quantity 2)
     }).await.unwrap();
 
     // Seed Maker (User 2) with BTC.
@@ -75,9 +74,8 @@ async fn test_settlement_buy_transaction() {
         symbol: "BTC_USDT".to_string(),
         price: 500,
         quantity: 2,
-        maker_user_id: "user_1".to_string(),
-        taker_user_id: "user_2".to_string(), // Taker gets 2 BTC
-        taker_side: Side::Buy,
+        buy_user_id: "user_2".to_string(), // Buyer gets 2 BTC
+        sell_user_id: "user_1".to_string(), 
     }).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -93,9 +91,8 @@ async fn test_settlement_buy_transaction() {
         symbol: "BTC_USDT".to_string(),
         price: 500,
         quantity: 2,
-        maker_user_id: "user_2".to_string(), // Maker
-        taker_user_id: "user_1".to_string(), // Taker
-        taker_side: Side::Buy,
+        buy_user_id: "user_1".to_string(), // Buyer
+        sell_user_id: "user_2".to_string(), // Seller
     }).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -122,9 +119,8 @@ async fn test_settlement_sell_transaction() {
         symbol: "BTC_USDT".to_string(),
         price: 500,
         quantity: 2,
-        maker_user_id: "user_2".to_string(),
-        taker_user_id: "user_1".to_string(), // Taker gets 2 BTC
-        taker_side: Side::Buy,
+        buy_user_id: "user_1".to_string(), // Buyer gets 2 BTC
+        sell_user_id: "user_2".to_string(),
     }).await.unwrap();
 
     // Seed Maker (User 2) with 1000 USDT
@@ -132,9 +128,8 @@ async fn test_settlement_sell_transaction() {
         symbol: "BTC_USDT".to_string(),
         price: 500,
         quantity: 2,
-        maker_user_id: "user_2".to_string(), // Maker gets 1000 USDT
-        taker_user_id: "user_1".to_string(),
-        taker_side: Side::Sell,
+        buy_user_id: "user_1".to_string(),
+        sell_user_id: "user_2".to_string(), // Seller gets 1000 USDT
     }).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -150,9 +145,8 @@ async fn test_settlement_sell_transaction() {
         symbol: "BTC_USDT".to_string(),
         price: 500,
         quantity: 2,
-        maker_user_id: "user_2".to_string(), // Maker
-        taker_user_id: "user_1".to_string(), // Taker
-        taker_side: Side::Sell,
+        buy_user_id: "user_2".to_string(), // Buyer
+        sell_user_id: "user_1".to_string(), // Seller
     }).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -177,9 +171,8 @@ async fn test_order_cancellation_release() {
         symbol: "BTC_USDT".to_string(),
         price: 500,
         quantity: 2,
-        maker_user_id: "user_2".to_string(),
-        taker_user_id: "user_1".to_string(), // Taker gets 1000 USDT
-        taker_side: Side::Sell,
+        buy_user_id: "user_2".to_string(),
+        sell_user_id: "user_1".to_string(), // Seller gets 1000 USDT
     }).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;

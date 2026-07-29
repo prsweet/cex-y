@@ -14,9 +14,9 @@ pub enum OrderStatus { PartiallyFilled, Open, Cancelled, Filled }
 
 #[derive(Debug)]
 pub struct RestingNode {
-    order: RestingOrder,
-    prev_node: Option<String>,
-    next_node: Option<String>
+    pub order: RestingOrder,
+    pub prev_node: Option<String>,
+    pub next_node: Option<String>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,8 +44,6 @@ pub struct Fill {
     pub trade_id: String,
     pub buy_user_id: String,
     pub sell_user_id: String,
-    pub maker_order_id: String,
-    pub taker_order_id: String,
     pub price: u64,
     pub quantity: u64
 }
@@ -172,14 +170,17 @@ impl OrderBook {
                 let remain = created_order.quantity - created_order.filled_qty;
                 let filled_qty = remain.min(resting_order.qty);
                 let matched_price = resting_order.price;
+
+                let (buy_user_id, sell_user_id) = match created_order.side {
+                    Side::Buy => (created_order.user_id.clone(), resting_order.user_id.clone()),
+                    Side::Sell => (resting_order.user_id.clone(), created_order.user_id.clone())
+                };
     
                 fills.push(Fill {
                     symbol: created_order.symbol.clone(),
                     trade_id: Ulid::new().to_string(),
-                    maker_user_id: resting_order.user_id.clone(),
-                    taker_user_id: created_order.user_id.clone(),
-                    maker_order_id: resting_order.order_id.clone(),
-                    taker_order_id: created_order.order_id.clone(),
+                    buy_user_id,
+                    sell_user_id,
                     price: matched_price,
                     quantity: filled_qty
                 });
@@ -295,39 +296,8 @@ impl OrderBook {
     }
 }
 
-#[derive(Debug)]
-pub struct EngineDB {
-    pub orderbooks: HashMap<String, OrderBook>,
-    pub orders: HashMap<String, Order>
-}
-
-impl EngineDB {
-    pub fn new() -> Self {
-        Self { 
-            orderbooks: HashMap::new(),
-            orders: HashMap::new() 
-        }
-    }
-
-    pub fn fill_order(&mut self, fills: Vec<Fill>) {
-        for val in fills {
-            let maker = self.orders.get_mut(&val.maker_order_id);
-
-            if let Some(maker) = maker {
-                maker.filled.push(val.clone());
-                maker.filled_qty += val.quantity;
-                if maker.filled_qty < maker.quantity {
-                    maker.status = OrderStatus::PartiallyFilled
-                } else {
-                    maker.status = OrderStatus::Filled
-                }
-            }
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug)]
-pub enum EngineCommand {
+pub enum ActorCommand {
     PlaceOrder {
         symbol: String,
         user_id: String,
@@ -368,25 +338,5 @@ pub enum BalanceEvent {
         user_id: String,
         symbol: String,
         amount: u64
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-pub enum EngineEvent {
-    OrderPlaced {
-        order: Order,
-        remaining: u64
-    },
-    OrderBookDepth {
-      symbol: String,
-      bids: Vec<(u64, u64)>,
-      asks: Vec<(u64, u64)>,
-    },
-    OrderCancelled {
-        order_id: String
-    },
-    Error {
-        message: String
     }
 }

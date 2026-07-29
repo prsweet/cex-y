@@ -4,7 +4,7 @@ use chrono::Utc;
 use tokio::sync::{mpsc::Receiver, mpsc::Sender};
 use ulid::Ulid;
 
-use crate::types::{BalanceCommand::{self, CheckAndLock}, BalanceEvent, BalancePool::{self, Available, Locked}, EngineCommand, Order, OrderBook, OrderStatus, Side::{self, Buy, Sell}, SymbolBalance};
+use crate::types::{BalanceCommand::{self, CheckAndLock}, BalanceEvent, BalancePool::{self, Available, Locked}, ActorCommand, Order, OrderBook, OrderStatus, Side::{self, Buy, Sell}, SymbolBalance};
 
 pub struct BalanceActor {
     balances: HashMap<String, HashMap<String, SymbolBalance>>, // user_id -> asset -> avail, lock
@@ -100,29 +100,17 @@ impl BalanceActor {
 
     fn handle_event(&mut self, event: BalanceEvent) {
         match event {
-            BalanceEvent::Fill { symbol, price, quantity, maker_user_id, taker_user_id, taker_side } => {
+            BalanceEvent::Fill { symbol, price, quantity, buy_user_id, sell_user_id} => {
                 let symbols: Vec<&str> = symbol.split('_').collect();
                 if symbols.len() != 2 { return; }
                 let buyer_paying = quantity * price;
 
-                match taker_side {
-                    Buy => {
-                        let (get, from) = (symbols[0], symbols[1]);
-                        let _ = self.deduct(&taker_user_id, &from, buyer_paying, Locked);
-                        self.add(&taker_user_id, &get, quantity, Available);
-                        
-                        self.add(&maker_user_id, &from, buyer_paying, Available);
-                        let _ = self.deduct(&maker_user_id, &get, quantity, Locked);
-                    },
-                    Sell => {
-                        let (from, get) = (symbols[0], symbols[1]);
-                        let _ = self.deduct(&taker_user_id, &from, quantity, Locked);
-                        self.add(&taker_user_id, &get, buyer_paying, Available);
-                        
-                        self.add(&maker_user_id, &from, quantity, Available);
-                        let _ = self.deduct(&maker_user_id, &get, buyer_paying, Locked);
-                    }
-                }
+                let (get, from) = (symbols[0], symbols[1]);
+                let _ = self.deduct(&buy_user_id, &from, buyer_paying, Locked);
+                self.add(&buy_user_id, &get, quantity, Available);
+                
+                self.add(&sell_user_id, &from, buyer_paying, Available);
+                let _ = self.deduct(&sell_user_id, &get, quantity, Locked);
             },
             BalanceEvent::CancelOrder { user_id, symbol, amount } => {
                 let user = self.balances.entry(user_id).or_default();
@@ -138,12 +126,12 @@ impl BalanceActor {
 pub struct SymbolActor {
     symbol: String,
     orderbook: OrderBook,
-    rx: Receiver<EngineCommand>,
+    rx: Receiver<ActorCommand>,
     event_tx: Sender<BalanceEvent>
 }
 
 impl SymbolActor {
-    pub fn new(symbol: String, rx: Receiver<EngineCommand>, event_tx: Sender<BalanceEvent>) -> Self {
+    pub fn new(symbol: String, rx: Receiver<ActorCommand>, event_tx: Sender<BalanceEvent>) -> Self {
         Self {
             symbol,
             orderbook: OrderBook::new(),
@@ -155,7 +143,7 @@ impl SymbolActor {
     pub async fn run(mut self) {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
-                EngineCommand::PlaceOrder { symbol, user_id, side, order_type, price, quantity } => {
+                ActorCommand::PlaceOrder { symbol, user_id, side, order_type, price, quantity } => {
                     let new_order_id = Ulid::new().to_string();
                     let mut created_order = Order {
                         symbol,
@@ -173,14 +161,14 @@ impl SymbolActor {
     
                     let fills = self.orderbook.match_order(&mut created_order);
 
-                    for (val) in fills {
-                        self.event_tx.send(BalanceEvent::Fill { 
-                            symbol: val.symbol, 
+                    for val in &fills {
+                        let _ = self.event_tx.send(BalanceEvent::Fill { 
+                            symbol: val.symbol.clone(), 
                             price: val.price, 
                             quantity: val.quantity, 
-                            buy_user_id: val.maker_user_id, 
-                            sell_user_id: val.taker_user_id,
-                        });
+                            buy_user_id: val.buy_user_id.clone(), 
+                            sell_user_id: val.sell_user_id.clone(),
+                        }).await;
                     }
                     
                     println!(
@@ -191,11 +179,17 @@ impl SymbolActor {
                         created_order.quantity
                     );
                 }
-                EngineCommand::CancelOrder { order_id, .. } => {
-                    self.orderbook.remove_order(&order_id);
+                ActorCommand::CancelOrder { symbol, order_id }=> {
+                    let Some(node) = self.orderbook.remove_order(&order_id) else { return };
+                    let order = node.order;
+                    let amount = match order.side {
+                        Side::Buy => order.qty * order.price,
+                        Side::Sell => order.qty
+                    };
+                    let _ = self.event_tx.send(BalanceEvent::CancelOrder { user_id: order.user_id, symbol, amount }).await;
                     println!("Cancelled {}", order_id);
                 }
-                EngineCommand::GetOrderBook { symbol } => {
+                ActorCommand::GetOrderBook { symbol } => {
                     let (bids, asks) = self.orderbook.get_depth();
                     println!("{}: {} bids, {} asks", symbol, bids.len(), asks.len());
                 }
