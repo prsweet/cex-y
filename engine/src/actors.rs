@@ -4,7 +4,7 @@ use chrono::Utc;
 use tokio::sync::{mpsc::Receiver, mpsc::Sender};
 use ulid::Ulid;
 
-use crate::types::{BalanceCommand::{self, CheckAndLock}, BalanceEvent, BalancePool::{self, Available, Locked}, ActorCommand, Order, OrderBook, OrderStatus, Side::{self, Buy, Sell}, SymbolBalance};
+use crate::{errors::EngineError, types::{ActorCommand, BalanceCommand, BalanceEvent, BalancePool, Order, OrderBook, OrderStatus, Side, SymbolBalance}};
 
 pub struct BalanceActor {
     balances: HashMap<String, HashMap<String, SymbolBalance>>, // user_id -> asset -> avail, lock
@@ -39,51 +39,65 @@ impl BalanceActor {
 
     fn handle_command(&mut self, cmd: BalanceCommand) {
         match cmd {
-            CheckAndLock { user_id, symbol, side, price, quantity, respond_tx } => {
+            BalanceCommand::CheckAndLock { user_id, symbol, side, price, quantity, respond_tx } => {
                 let symbols: Vec<&str> = symbol.split("_").collect();
                 if symbols.len() != 2 {
-                    let _ = respond_tx.send(Err("Invalid symbol format".to_string()));
+                    let _ = respond_tx.send(Err(EngineError::InvalidSymbol { symbol }));
                     return;
                 }
                 let (locking_symbol, amount) = match side {
                     Side::Buy => (symbols[1], price * quantity),
                     Side::Sell => (symbols[0], quantity)
                 };
-                match self.deduct(&user_id, locking_symbol, amount, Available) {
+                match self.deduct(&user_id, locking_symbol, amount, BalancePool::Available) {
                     Ok(()) => {
-                        self.add(&user_id, &locking_symbol, amount, Locked);
+                        self.add(&user_id, &locking_symbol, amount, BalancePool::Locked);
                         let _ = respond_tx.send(Ok(()));
+                    },
+                    Err(EngineError::InsufficientAvailableBalanced { required, available }) => {
+                        let _ = respond_tx.send(Err(EngineError::InsufficientAvailableBalanced { required, available }));
                     }
                     Err(e) => {
-                        let _ = respond_tx.send(Err(e));
+                        let _ = respond_tx.send(Err(EngineError::UnexpectedError { message: format!("{:#?}", e) }));
                     }
                 }
+            },
+            BalanceCommand::GetBalance { user_id, symbol, respond_tx } => {
+                let _ = respond_tx.send(self.get_balance(&user_id, &symbol));
             }
         }
     }
 
-    pub fn get_balance(&self, user_id: &str, symbol: &str) -> Option<SymbolBalance> {
-        self.balances.get(user_id)?.get(symbol).cloned()
+    pub fn get_balance(&self, user_id: &str, symbol: &str) -> Result<SymbolBalance, EngineError> {
+        let Some(user) = self.balances.get(user_id) else {
+            return Err(EngineError::UserNotFound { user_id: user_id.to_string() });
+        };
+
+        let Some(bal) = user.get(symbol) else {
+            return Err(EngineError::InvalidSymbol { symbol: symbol.to_string() });
+        };
+
+        Ok(bal.clone())
     }
 
-    pub fn deduct(&mut self, user_id: &str, symbol: &str, amount: u64, balance_pool: BalancePool) -> Result<(), String> {
+    pub fn deduct(&mut self, user_id: &str, symbol: &str, amount: u64, balance_pool: BalancePool) -> Result<(), EngineError> {
         let user = self.balances.entry(user_id.to_string()).or_default();
         let balance = user.entry(symbol.to_string()).or_insert(SymbolBalance { available: 0, locked: 0 });
         match balance_pool {
-            Available => {
+            BalancePool::Available => {
                 if balance.available >= amount {
                     balance.available = balance.available.saturating_sub(amount);
                     Ok(())
                 } else {
-                    Err("Insufficient available funds".to_string())
+                    Err(EngineError::InsufficientAvailableBalanced { required: amount, available: balance.available })
                 }
             }
-            Locked => {
+            BalancePool::Locked => {
                 if balance.locked >= amount {
                     balance.locked = balance.locked.saturating_sub(amount);
                     Ok(())
                 } else {
-                    Err("Insufficient locked funds".to_string())
+                    Err(EngineError::InsufficientLockedBalanced { required: amount, locked: balance.locked })
                 }
             }
         }
@@ -93,8 +107,8 @@ impl BalanceActor {
         let user = self.balances.entry(user_id.to_string()).or_default();
         let balance = user.entry(symbol.to_string()).or_insert(SymbolBalance { available: 0, locked: 0 });
         match balance_pool {
-            Available => balance.available = balance.available.saturating_add(amount),
-            Locked => balance.locked = balance.locked.saturating_add(amount)
+            BalancePool::Available => balance.available = balance.available.saturating_add(amount),
+            BalancePool::Locked => balance.locked = balance.locked.saturating_add(amount)
         }
     }
 
@@ -106,11 +120,11 @@ impl BalanceActor {
                 let buyer_paying = quantity * price;
 
                 let (get, from) = (symbols[0], symbols[1]);
-                let _ = self.deduct(&buy_user_id, &from, buyer_paying, Locked);
-                self.add(&buy_user_id, &get, quantity, Available);
+                let _ = self.deduct(&buy_user_id, &from, buyer_paying, BalancePool::Locked);
+                self.add(&buy_user_id, &get, quantity, BalancePool::Available);
                 
-                self.add(&sell_user_id, &from, buyer_paying, Available);
-                let _ = self.deduct(&sell_user_id, &get, quantity, Locked);
+                self.add(&sell_user_id, &from, buyer_paying, BalancePool::Available);
+                let _ = self.deduct(&sell_user_id, &get, quantity, BalancePool::Locked);
             },
             BalanceEvent::CancelOrder { user_id, symbol, amount } => {
                 let user = self.balances.entry(user_id).or_default();
